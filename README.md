@@ -1,231 +1,157 @@
 
-## 1. How to run the webhook
+Rough as in — this is the shape, not a formal UML export. The exported
+agent zip has the exact pages, routes, and conditions if you need the
+precise version.
 
-```bash
-cd webhook
-python -m venv venv && source venv/bin/activate   # optional but recommended
-pip install -r requirements.txt
-cp .env.example .env                               # edit if you want a shared secret
-python app.py
-# Webhook is now listening on http://localhost:8080/webhook
-```
+## Interruption handling
 
-Health check: `curl http://localhost:8080/healthz` → `{"status": "ok"}`
+There's a route group called "Global Interruptions" attached at the
+Troubleshooting flow level, not on any individual page, so `check.outage`
+can fire no matter where you are inside that flow — mid router-status
+question, looking at a recommendation, wherever. Attaching it per-page
+would mean re-adding it every time I added a page, and I'd inevitably
+forget one.
 
-Dialogflow CX needs to reach this over HTTPS. During development, expose it
-with [ngrok](https://ngrok.com/):
+When it fires, Troubleshooting's own session params don't get touched —
+CX keeps session parameters around across flows in the same session
+automatically, so nothing gets lost just by hopping over to Outage Check.
+No Outage sends the user back into Troubleshooting where they left off;
+Outage Found ends the troubleshooting attempt outright, since there's not
+much point continuing to ask about router lights if there's a confirmed
+outage in the area. That's the "resume or exit, whichever makes sense"
+behavior the assignment asked for.
 
-```bash
-ngrok http 8080
-```
+## Composite-input handling (the "cognitive" requirement)
 
-Use the `https://...ngrok-free.app/webhook` URL as the webhook URI in the CX
-console (or in `build_agent.py`'s `WEBHOOK_URL` config).
+This came in as a follow-up from the client after the original build was
+basically done. The ask: if someone says something like
 
-## 2. How to configure/import the Dialogflow CX agent
+> "My internet is not working. I've already restarted the modem and my
+> laptop, and tried both LAN and Wi-Fi, still broken."
 
-**Recommended path (fast, reproducible):**
+— i.e. one message that already answers both the device-scope and
+router-status questions — the agent shouldn't make them repeat all that.
+It should skip straight to escalation and acknowledge what they already
+tried.
 
-```bash
-cd dialogflow_cx_agent
-pip install -r requirements.txt
-gcloud auth application-default login
-# edit build_agent.py: set PROJECT_ID, WEBHOOK_URL (your ngrok URL)
-python build_agent.py
-```
+I didn't want to reach for anything generative here — partly because it's
+genuinely out of scope for a standard CX agent, and partly because I'd
+rather ship something deterministic I can actually demo working the same
+way twice. So it's built as:
 
-This creates the agent, entity types, intents, all four flows, their pages,
-transition routes, and the webhook resource — end to end — using the
-Dialogflow CX Python client. It prints the console URL at the end.
+- a new intent, `report.connectivity_issue.exhausted`, trained on phrasing
+  that describes multiple completed troubleshooting steps in one message
+- matching it sets a session parameter, `skip_to_escalate = true`
+- at the top of Troubleshooting's entry routing — before the normal
+  catch-all into Collect Device Scope — there's a route that checks that
+  parameter and sends things straight to Escalate if it's set
+- Escalate's message is conditional on that same parameter: if it's set,
+  it acknowledges the steps already taken instead of the generic
+  escalation line
 
-**Why script the agent instead of a manual export?** Dialogflow CX agent
-exports are binary-ish ZIPs that don't diff cleanly in git and don't show
-*why* something was built a certain way. A Python build script is
-reviewable, versionable, and re-runnable — which is also the answer to
-Question 4 (safe deploys) below: this script *is* the deployable artifact.
+A plain "my internet isn't working" doesn't match that intent, so it
+falls through to the normal catch-all and runs the full Q&A exactly like
+before — this only kicks in when the composite pattern is actually there.
 
-**If you'd rather build by hand in the console**, use `docs/architecture.md`
-as your blueprint — it lists every flow, page, intent, and transition this
-script creates, so you can recreate it by clicking instead.
+Worth saying plainly: this is pattern matching against training phrases,
+not the model reasoning about the conversation. That's a real limitation
+— it'll handle the documented example and things phrased similarly, but
+won't generalize to every possible way someone could describe having
+already tried everything. Trade-off I made on purpose, and I'd rather be
+upfront about it than have it look like more than it is.
 
-**Alternatively**, `exported_agent_ISP Customer Support Assistant.zip` in
-the repo root is a direct JSON Package export of the live agent (Draft
-environment, taken after all fixes and the composite-input enhancement
-below). It can be imported directly via **Dialogflow CX console → Agent
-selector → Import** without running `build_agent.py` at all — this is the
-fastest way to get the exact, final agent state running.
+## Technical design questions
 
-## 3. Required environment variables
+**Why this flow/page structure?**
+Mainly explained above — one flow per journey keeps each conversation's
+state and routing self-contained, and the thin start flow means adding a
+fourth or fifth journey later doesn't mean touching the existing three.
 
-Webhook (`webhook/.env`):
-| Variable | Required | Purpose |
-|---|---|---|
-| `PORT` | no (default 8080) | local port |
-| `LOG_LEVEL` | no | Python logging level |
-| `WEBHOOK_SHARED_SECRET` | no | if set, `/webhook` requires header `X-Webhook-Secret` to match |
+**What goes in session parameters vs. backend storage?**
+Session params: whatever the current turn needs to make its next
+decision — device scope, router status, the ticket ID somebody just gave.
+Backend storage: anything that needs to outlive the conversation or be
+looked up independently of it — actual outage records, actual ticket
+data, anything that counts as a customer's real account information.
+Session state is disposable by design; if the session ends, nothing of
+record should be lost with it.
 
-Agent build script (`dialogflow_cx_agent/build_agent.py`, edited in-file
-rather than env vars since it's a one-time setup script):
-`PROJECT_ID`, `LOCATION`, `WEBHOOK_URL`, `WEBHOOK_SHARED_SECRET`
+**How would this scale to 100+ journeys?**
+Honestly, I wouldn't keep it as one growing pile of flows in one agent —
+I'd split by domain (billing, connectivity, account, etc.) potentially
+across multiple agents or at least clearly namespaced flow groups, with a
+routing layer in front that classifies broad intent first and only then
+hands off to the specific flow. Shared logic (auth checks, common
+escalation, logging) would need to live somewhere flows can call into
+rather than getting copy-pasted across 100 flows.
 
-## 4. How to run tests
+**How would you version and deploy this safely?**
+Treat `build_agent.py` (or an equivalent declarative definition) as the
+source of truth, not the console. Changes go through a normal PR/review
+process, get applied to a staging agent first, get tested there, then
+promoted. CX supports versions/environments natively — I'd use a
+"staging" environment for anything unverified and only point production
+traffic at a version once it's been through real testing, with an easy
+rollback to the prior version if something regresses.
 
-```bash
-cd webhook
-pip install -r requirements.txt
-python -m pytest tests/ -v
-```
+**No-match rate suddenly spikes after a release — how do you investigate?**
+First thing I'd check is whether it's every intent or concentrated on a
+few — that alone tells you if it's a broad regression (webhook down,
+routing broken) or something narrower (one flow's training phrases got
+touched). Then compare timing against the release itself and against any
+NLU model retraining that might have happened independently. If it's
+concentrated, pull actual transcripts from around the spike and see what
+users are actually typing that isn't matching — usually it's either a
+wording pattern nobody trained for, or a route that got reordered/removed
+in the release.
 
-22 tests covering: outage lookup (happy path, unknown zip, invalid zip,
-simulated timeout, simulated 5xx, simulated malformed response), ticket
-lookup (happy path, not found, invalid ID, simulated 5xx), and the Flask
-layer end-to-end (correct session parameters set, correct HTTP status
-codes, correct fallback error text).
+## What I'd watch in production, and how I'd handle sensitive stuff
 
-## 5. Architectural decisions (brief — see `docs/architecture.md` for detail)
+Latency and error rate per webhook tag, alerting if p95 gets anywhere
+near the CX webhook timeout. No-match rate per intent and per page, since
+a jump usually means either a training gap or something broke in a
+recent release. Where conversations die — which page people abandon at —
+bucketed so it's obvious if one particular step is the problem.
+Completion rate against a defined "success" page per journey. And
+escalation rate over time, since a sustained rise there might mean an
+actual service issue rather than a bot problem, or conversely might mean
+the composite-input logic above is misfiring somewhere.
 
-- **One flow per journey** (Troubleshooting / Outage Check / Ticket Status),
-  with a thin **Default Start Flow** doing nothing but intent-based routing.
-  This keeps each flow's pages, parameters, and routes scoped to a single
-  conversational job — easier to reason about, test, and hand to another
-  engineer.
-- **Session parameters carry conversational state only** (what device
-  scope, what router status, what ticket ID) — never PII beyond what's
-  needed for the active turn, and never the definitive record of anything
-  (see `docs/answers.md` Q2 for the full session-vs-backend split).
-- **Two webhook tags, one Flask app**: `check-outage` and
-  `get-ticket-status`. Dialogflow-facing parsing lives only in `app.py`;
-  all actual logic lives in `services/`, independently unit-testable.
+On the security side: no secrets in code, ever — webhook secret and any
+downstream API keys belong in Secret Manager or equivalent, injected at
+deploy time. Don't collect more customer data than the active journey
+needs. Don't log raw parameter values at INFO in prod — hash or truncate
+identifiers, save full detail for DEBUG in non-prod only. The
+shared-secret header this webhook uses is a floor, not a ceiling — a real
+deployment should lean on CX's built-in service-account webhook auth
+instead, so there's no static secret sitting around to leak in the first
+place.
 
-## 6. Interruption/resumption approach
+## Known limitations
 
-A **route group** ("Global Interruptions") is attached at the
-**Troubleshooting flow level** (not a single page), so the `check.outage`
-intent is reachable from *every* page inside that flow — the user can ask
-"is there an outage?" whether they're mid router-status question or looking
-at a recommendation, without Dialogflow CX no-matching on it.
+- The "backend" is in-memory fake data plus explicit failure flags
+  (`simulate="timeout"/"5xx"/"malformed"`), not a real ISP system —
+  enough to prove the error-handling paths work without standing up real
+  infra.
+- `build_agent.py` isn't idempotent. Re-run it against an agent that
+  already exists and you'll get duplicates, not an update.
+- A couple of pages use CX's conditional-response syntax inline rather
+  than as separate per-value response blocks, mostly for brevity — in a
+  real console build I'd split those out.
+- Nothing here is deployed to Cloud Run or anywhere else — running the
+  webhook locally via ngrok is explicitly allowed by the assignment, so
+  that's what this is.
+- The composite-input detection is intent/pattern-based, so it's solid
+  for the documented example and close variants, but it's not going to
+  catch every conceivable phrasing of "I already tried everything" —
+  that would need either a lot more training phrases over time or a
+  genuinely different approach.
 
-When that interruption fires, control passes to the Outage Check flow.
-Troubleshooting's own session parameters (`device_scope`, `router_status`,
-etc.) are untouched — Dialogflow CX session parameters persist across
-flows in the same session by default, so nothing is lost. Once the outage
-check resolves, the **No Outage** page returns the user to the
-Troubleshooting flow; the **Outage Found** page instead ends the
-troubleshooting attempt, since a confirmed outage makes further
-troubleshooting steps pointless — that's the "exit when appropriate"
-branch the assignment calls for.
+## Demo
 
-## 7. Composite-input / context-aware escalation
+Video: **[add link here]**
 
-A follow-up requirement asked the agent to handle a single message that
-already answers several troubleshooting questions at once, e.g.:
-
-> "My internet is not working. I have already restarted the modem and my
-> laptop/mobile, and tested the connection using both LAN and Wi-Fi, but
-> the issue is still not resolved."
-
-Rather than re-asking device scope and router status, the agent should
-recognize that these steps are already exhausted and route straight to a
-human agent (Escalate), acknowledging what the user already tried.
-
-**How this is implemented — intent-based, not generative:** this is
-deliberately **not** open-ended LLM reasoning, which is out of scope for a
-classic Dialogflow CX agent (and harder to test/verify for a case like
-this). Instead:
-
-1. A dedicated intent, **`report.connectivity_issue.exhausted`**, is
-   trained on phrasings that describe having already completed multiple
-   troubleshooting steps in one message (modem/device restart *and*
-   LAN/Wi-Fi already tested, still broken).
-2. When that intent matches, its route sets a session parameter preset,
-   `skip_to_escalate = true`.
-3. At the **top of the Connectivity Troubleshooting flow's entry
-   routing** — checked *before* the catch-all route into **Collect Device
-   Scope** — a conditioned route checks `skip_to_escalate`. If true, the
-   conversation is sent straight to the **Escalate** page, bypassing the
-   device-scope and router-status questions entirely.
-4. The **Escalate** page's fulfillment message is now conditional: when
-   `skip_to_escalate` is true, it acknowledges the steps the user already
-   described instead of showing the generic escalation message.
-
-A normal short complaint ("My internet isn't working") does **not** match
-`report.connectivity_issue.exhausted`, so it still falls through to the
-original catch-all route and runs the full step-by-step Q&A — the new
-logic only short-circuits when the composite pattern is actually present,
-and doesn't change behavior for the standard journey.
-
-Being explicit that this is pattern/intent matching rather than
-open-ended reasoning is a deliberate choice: it's deterministic, testable,
-and reviewable in the same way as the rest of the agent, rather than
-depending on a model's judgment call at runtime.
-
-## 8. Production considerations
-
-**What I'd monitor:**
-- **Webhook latency/failures** — p50/p95/p99 latency and error rate per
-  tag (`check-outage`, `get-ticket-status`), alerting on error-rate
-  spikes or p95 breaching the CX webhook timeout.
-- **No-match rate** — per intent and per page, since a spike usually means
-  a training-phrase gap or a wording change in a recent release.
-- **Conversation abandonment** — sessions ending outside a "resolved" or
-  "escalated" terminal page, bucketed by which flow/page they dropped at.
-- **Task completion rate** — % of sessions that reach a defined success
-  page (Resolved / Outage Found+acknowledged / Ticket status delivered).
-- **Escalation rate** — how often Troubleshooting ends at "Escalate" over
-  time; a sustained increase suggests either a real outage/incident or a
-  regression in the troubleshooting steps themselves (including the new
-  composite-input path in section 7 above).
-
-**Credentials/secrets:** webhook URL's shared secret and any downstream
-API keys go in a secret manager (e.g. GCP Secret Manager), injected as
-env vars at deploy time — never committed, never logged.
-
-**Sensitive customer info:** avoid collecting more than the active
-journey needs (ZIP code, ticket ID); don't log raw parameter values at
-INFO in production — log hashed/truncated identifiers, full detail only
-at DEBUG in non-prod.
-
-**Webhook authentication:** the shared-secret header shown in `app.py` is
-the minimum; for a real deployment prefer Dialogflow CX's built-in
-service-account-based webhook auth (OIDC token) fronted by Cloud Run/Cloud
-Functions IAM, so no static secret is needed at all.
-
-**Logging of customer data:** structured logs with a request ID, no raw
-PII in log lines (ZIP codes are borderline-sensitive at scale — treat like
-PII), and a retention/rotation policy in line with whatever data-privacy
-regime applies to the ISP's customers.
-
-## 9. Known limitations
-
-- The webhook's "backend" is simulated in-memory data plus explicit
-  failure-injection flags (`simulate="timeout"/"5xx"/"malformed"`) rather
-  than a real ISP system — sufficient to demonstrate the required error
-  paths without needing real infrastructure.
-- `build_agent.py` is a first-run script, not idempotent — re-running it
-  against an existing agent will create duplicate resources. For iterative
-  development, delete-and-recreate the agent, or extend the script to
-  check for existing resources by display name first.
-- Fulfillment text in a couple of pages uses Dialogflow CX's conditional
-  response syntax inline for brevity; in the real console you'd normally
-  split these into separate conditioned response messages per parameter
-  value rather than one string with embedded conditions.
-- No Cloud Run/Cloud Functions deployment config is included — the
-  assignment explicitly allows running the webhook locally via ngrok.
-- The composite-input detection in section 7 is intent/pattern-based, so
-  it covers the documented example and similarly-phrased variants well,
-  but — unlike a generative approach — it won't generalize to arbitrarily
-  worded composite complaints outside its training phrases without adding
-  more phrases over time.
-
-## 10. Demo
-
-A short recorded demo is available here: **[ADD YOUR VIDEO LINK HERE]**
-
-It covers:
-- The composite-input example from section 7 above, showing the
-  troubleshooting questions skipped and direct routing to Escalate with
-  the acknowledgment message.
-- A backend-failure scenario (simulated outage-service timeout) with
-  graceful recovery, per the assignment's error-handling requirement.
-- A standard Troubleshooting journey (resolved path), an Outage Check,
-  and one interruption scenario, for completeness.
+Covers the composite-input example above skipping straight to Escalate,
+a simulated backend timeout with graceful recovery, and quick passes
+through a normal resolved troubleshooting run, an outage check, and one
+interruption mid-flow.
