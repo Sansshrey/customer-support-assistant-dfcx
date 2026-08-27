@@ -1,30 +1,3 @@
-# ISP Customer Support Assistant — Dialogflow CX
-
-A small, production-oriented customer support assistant for an ISP, built on
-Dialogflow CX. Handles connectivity troubleshooting, outage checks (via
-webhook), and ticket status lookups (via webhook), with interruption
-handling and explicit failure-recovery paths.
-
-## Repository layout
-
-```
-.
-├── README.md                     ← you are here
-├── docs/
-│   └── architecture.md           ← flow/page diagram + design rationale
-│   └── answers.md                ← technical design questions
-├── dialogflow_cx_agent/
-│   ├── build_agent.py            ← creates the whole CX agent via API
-│   └── requirements.txt
-└── webhook/
-    ├── app.py                    ← Flask webhook (Dialogflow-facing layer)
-    ├── services/
-    │   ├── outage_service.py     ← outage business logic
-    │   └── ticket_service.py     ← ticket business logic
-    ├── tests/
-    ├── requirements.txt
-    └── .env.example
-```
 
 ## 1. How to run the webhook
 
@@ -74,6 +47,13 @@ Question 4 (safe deploys) below: this script *is* the deployable artifact.
 **If you'd rather build by hand in the console**, use `docs/architecture.md`
 as your blueprint — it lists every flow, page, intent, and transition this
 script creates, so you can recreate it by clicking instead.
+
+**Alternatively**, `exported_agent_ISP Customer Support Assistant.zip` in
+the repo root is a direct JSON Package export of the live agent (Draft
+environment, taken after all fixes and the composite-input enhancement
+below). It can be imported directly via **Dialogflow CX console → Agent
+selector → Import** without running `build_agent.py` at all — this is the
+fastest way to get the exact, final agent state running.
 
 ## 3. Required environment variables
 
@@ -135,7 +115,51 @@ troubleshooting attempt, since a confirmed outage makes further
 troubleshooting steps pointless — that's the "exit when appropriate"
 branch the assignment calls for.
 
-## 7. Production considerations
+## 7. Composite-input / context-aware escalation
+
+A follow-up requirement asked the agent to handle a single message that
+already answers several troubleshooting questions at once, e.g.:
+
+> "My internet is not working. I have already restarted the modem and my
+> laptop/mobile, and tested the connection using both LAN and Wi-Fi, but
+> the issue is still not resolved."
+
+Rather than re-asking device scope and router status, the agent should
+recognize that these steps are already exhausted and route straight to a
+human agent (Escalate), acknowledging what the user already tried.
+
+**How this is implemented — intent-based, not generative:** this is
+deliberately **not** open-ended LLM reasoning, which is out of scope for a
+classic Dialogflow CX agent (and harder to test/verify for a case like
+this). Instead:
+
+1. A dedicated intent, **`report.connectivity_issue.exhausted`**, is
+   trained on phrasings that describe having already completed multiple
+   troubleshooting steps in one message (modem/device restart *and*
+   LAN/Wi-Fi already tested, still broken).
+2. When that intent matches, its route sets a session parameter preset,
+   `skip_to_escalate = true`.
+3. At the **top of the Connectivity Troubleshooting flow's entry
+   routing** — checked *before* the catch-all route into **Collect Device
+   Scope** — a conditioned route checks `skip_to_escalate`. If true, the
+   conversation is sent straight to the **Escalate** page, bypassing the
+   device-scope and router-status questions entirely.
+4. The **Escalate** page's fulfillment message is now conditional: when
+   `skip_to_escalate` is true, it acknowledges the steps the user already
+   described instead of showing the generic escalation message.
+
+A normal short complaint ("My internet isn't working") does **not** match
+`report.connectivity_issue.exhausted`, so it still falls through to the
+original catch-all route and runs the full step-by-step Q&A — the new
+logic only short-circuits when the composite pattern is actually present,
+and doesn't change behavior for the standard journey.
+
+Being explicit that this is pattern/intent matching rather than
+open-ended reasoning is a deliberate choice: it's deterministic, testable,
+and reviewable in the same way as the rest of the agent, rather than
+depending on a model's judgment call at runtime.
+
+## 8. Production considerations
 
 **What I'd monitor:**
 - **Webhook latency/failures** — p50/p95/p99 latency and error rate per
@@ -149,7 +173,8 @@ branch the assignment calls for.
   page (Resolved / Outage Found+acknowledged / Ticket status delivered).
 - **Escalation rate** — how often Troubleshooting ends at "Escalate" over
   time; a sustained increase suggests either a real outage/incident or a
-  regression in the troubleshooting steps themselves.
+  regression in the troubleshooting steps themselves (including the new
+  composite-input path in section 7 above).
 
 **Credentials/secrets:** webhook URL's shared secret and any downstream
 API keys go in a secret manager (e.g. GCP Secret Manager), injected as
@@ -170,7 +195,7 @@ PII in log lines (ZIP codes are borderline-sensitive at scale — treat like
 PII), and a retention/rotation policy in line with whatever data-privacy
 regime applies to the ISP's customers.
 
-## 8. Known limitations
+## 9. Known limitations
 
 - The webhook's "backend" is simulated in-memory data plus explicit
   failure-injection flags (`simulate="timeout"/"5xx"/"malformed"`) rather
@@ -186,3 +211,21 @@ regime applies to the ISP's customers.
   value rather than one string with embedded conditions.
 - No Cloud Run/Cloud Functions deployment config is included — the
   assignment explicitly allows running the webhook locally via ngrok.
+- The composite-input detection in section 7 is intent/pattern-based, so
+  it covers the documented example and similarly-phrased variants well,
+  but — unlike a generative approach — it won't generalize to arbitrarily
+  worded composite complaints outside its training phrases without adding
+  more phrases over time.
+
+## 10. Demo
+
+A short recorded demo is available here: **[ADD YOUR VIDEO LINK HERE]**
+
+It covers:
+- The composite-input example from section 7 above, showing the
+  troubleshooting questions skipped and direct routing to Escalate with
+  the acknowledgment message.
+- A backend-failure scenario (simulated outage-service timeout) with
+  graceful recovery, per the assignment's error-handling requirement.
+- A standard Troubleshooting journey (resolved path), an Outage Check,
+  and one interruption scenario, for completeness.
