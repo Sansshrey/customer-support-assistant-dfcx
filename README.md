@@ -7,6 +7,23 @@ backend; troubleshooting is pure flow logic. Built to be small enough to
 actually finish, not a demo of every CX feature that exists.
 
 ## What's in here
+
+```
+.
+├── README.md
+├── dialogflow_cx_agent/
+│   ├── build_agent.py            ← builds the whole agent via the CX API
+│   └── requirements.txt
+├── exported_agent_ISP Customer Support Assistant.zip   ← direct agent export
+└── webhook/
+    ├── app.py                    ← Flask, Dialogflow-facing
+    ├── services/
+    │   ├── outage_service.py
+    │   └── ticket_service.py
+    ├── tests/
+    ├── requirements.txt
+    └── .env.example
+```
 ## Architecture diagram
 
 ```mermaid
