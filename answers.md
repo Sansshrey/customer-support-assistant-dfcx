@@ -1,6 +1,6 @@
 # Technical Design Questions
 
-### Q1 — Why did you choose your Flow/Page structure?
+### Q1 Why did you choose your Flow/Page structure?
 
 Each customer journey (Troubleshooting, Outage Check, Ticket Status) gets
 its own flow, with a small Default Start Flow that just routes based on
@@ -10,7 +10,7 @@ add the outage interruption once at the flow level instead of repeating
 it on every page. Adding a new journey later just means adding a new
 flow, not touching the existing ones.
 
-### Q2 — What should live in session parameters vs. backend storage?
+### Q2 What should live in session parameters vs. backend storage?
 
 **Session parameters** hold what the current conversation needs right
 now: `device_scope`, `router_status`, `zip_code`, `ticket_id`, and
@@ -23,7 +23,7 @@ account info, outage records, and a log of what the assistant did on the
 customer's behalf. Anything that needs to exist after the chat ends or
 get looked up later belongs there, not in Dialogflow CX.
 
-### Q3 — How would you structure this for 100+ customer journeys?
+### Q3 How would you structure this for 100+ customer journeys?
 
 * Group flows by domain (Billing, Connectivity, Accounts) instead of one
   flow per tiny journey, so the flow list stays manageable.
@@ -36,7 +36,7 @@ get looked up later belongs there, not in Dialogflow CX.
 * Treat the agent as code, same as `build_agent.py` does now, so changes
   go through review and testing like the webhook does.
 
-### Q4 — How would you safely version and deploy CX and webhook changes?
+### Q4 How would you safely version and deploy CX and webhook changes?
 
 For the webhook, it is a normal deploy pipeline: version control, tests,
 and something like Cloud Run revisions so traffic can shift gradually
@@ -51,7 +51,7 @@ Keep the agent definition in the same repo as the webhook so related
 changes get reviewed and released together. Where possible, send a new
 version to a small percentage of traffic first before full rollout.
 
-### Q5 — A release causes the no match rate to jump. How do you investigate?
+### Q5 A release causes the no match rate to jump. How do you investigate?
 
 1. Check if the timing lines up with the release, not something
    unrelated like a traffic spike or webhook outage.
