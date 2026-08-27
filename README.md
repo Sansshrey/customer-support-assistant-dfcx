@@ -11,6 +11,8 @@ actually finish, not a demo of every CX feature that exists.
 ```
 .
 ├── README.md
+├── architecture.md               ← flow/page diagram + design rationale
+├── answers.md                    ← technical design question answers
 ├── dialogflow_cx_agent/
 │   ├── build_agent.py            ← builds the whole agent via the CX API
 │   └── requirements.txt
@@ -24,66 +26,21 @@ actually finish, not a demo of every CX feature that exists.
     ├── requirements.txt
     └── .env.example
 ```
-## Architecture diagram
 
-```mermaid
-flowchart TD
-    U([User message]) --> DSF[["Default Start Flow<br/>intent-based routing"]]
+## Architecture
 
-    DSF -->|"check ticket INC-xxxx"| TS_ENTRY
-    DSF -->|"my internet isn't working"| CT_ENTRY
-    DSF -->|"is there an outage"| OC_ENTRY
+See [architecture.md](./architecture.md) for the full flow/page diagram
+and the reasoning behind the structure — includes a rendered Mermaid
+diagram of all three flows, the interruption/composite-input paths, and
+page-level detail for every flow.
 
-    subgraph TS["Ticket Status"]
-        direction TB
-        TS_ENTRY[Collect Ticket ID] --> TS_CALL[Call Ticket Webhook]
-        TS_CALL --> TS_SHOW[Show Ticket Status]
-        TS_CALL -.-> TS_WH[(webhook:<br/>ticket_service.py)]
-    end
-
-    subgraph CT["Connectivity Troubleshooting"]
-        direction TB
-        CT_ENTRY[Collect Device Scope] --> CT_ROUTER[Collect Router Status]
-        CT_ROUTER --> CT_REC[Give Recommendation]
-        CT_REC -->|resolved| CT_RES{{Resolved}}
-        CT_REC -->|not resolved| CT_ESC{{Escalate}}
-        CT_EXH["report.connectivity_issue.exhausted<br/>matched → skip_to_escalate=true"] --> CT_ESC
-    end
-
-    subgraph OC["Outage Check"]
-        direction TB
-        OC_ENTRY[Collect Zip] --> OC_CALL[Call Outage Webhook]
-        OC_CALL -->|outage: true| OC_FOUND[Outage Found]
-        OC_CALL -->|outage: false| OC_NO[No Outage]
-        OC_CALL -.-> OC_WH[(webhook:<br/>outage_service.py)]
-    end
-
-    CT -.->|"check.outage interrupt<br/>Global Interruptions route group"| OC
-    OC_NO -.->|resume troubleshooting| CT_ROUTER
-    OC_FOUND -.->|exits troubleshooting| CT_ESC
-
-    classDef terminal fill:#ffe3e3,stroke:#c92a2a,font-weight:bold;
-    classDef webhook fill:#e7f5ff,stroke:#1971c2;
-    classDef entry fill:#d3f9d8,stroke:#2f9e44;
-    class CT_RES,CT_ESC terminal
-    class TS_WH,OC_WH webhook
-    class DSF entry
-```
-
-**How to read it:** solid arrows are the normal, straight-line path through
-each journey. Dotted arrows are the three places the agent deviates from
-that straight line the outage interrupt firing mid-troubleshooting, the
-resume back into it once there's no outage, and the composite-input intent
-jumping directly to Escalate. Green is the entry router, red diamonds are
-the two terminal states in Troubleshooting, blue cylinders are the two
-places a flow calls out to the Flask webhook.
 ## Running the webhook
 
 ```bash
 cd webhook
 python -m venv venv && source venv/bin/activate
 pip install -r requirements.txt
-cp .env.example .env      
+cp .env.example .env      # only needed if you want the shared-secret check on
 python app.py
 ```
 
@@ -128,7 +85,7 @@ I went with a script instead of hand-building in the console mainly
 because it's the only version of "the agent" that diffs cleanly in git —
 the export zip is basically a binary blob as far as version control
 cares. The script also doubles as the answer to the deployment question
-further down: it's the thing you'd actually run in a pipeline.
+in `answers.md`: it's the thing you'd actually run in a pipeline.
 
 One thing worth knowing: it isn't idempotent. Run it twice against the
 same project and you'll get duplicate flows. Fine for a take-home, not
@@ -172,7 +129,8 @@ under one flow because each of the three journeys has its own parameters
 and its own failure modes — mixing them would mean every page's routing
 logic has to account for state that belongs to a completely different
 conversation. Splitting them means I can look at the Outage Check flow in
-isolation and know everything relevant to it is right there.
+isolation and know everything relevant to it is right there. (Full
+rationale in `architecture.md`.)
 
 Session parameters only ever hold what the current conversation needs —
 device scope, router status, the ticket ID being looked up. Nothing that
@@ -247,49 +205,10 @@ is.
 
 ## Technical design questions
 
-**Why this flow/page structure?**
-Mainly explained above — one flow per journey keeps each conversation's
-state and routing self-contained, and the thin start flow means adding a
-fourth or fifth journey later doesn't mean touching the existing three.
-
-**What goes in session parameters vs. backend storage?**
-Session params: whatever the current turn needs to make its next
-decision — device scope, router status, the ticket ID somebody just
-gave. Backend storage: anything that needs to outlive the conversation
-or be looked up independently of it — actual outage records, actual
-ticket data, anything that counts as a customer's real account
-information. Session state is disposable by design; if the session ends,
-nothing of record should be lost with it.
-
-**How would this scale to 100+ journeys?**
-Honestly, I wouldn't keep it as one growing pile of flows in one agent —
-I'd split by domain (billing, connectivity, account, etc.) potentially
-across multiple agents or at least clearly namespaced flow groups, with a
-routing layer in front that classifies broad intent first and only then
-hands off to the specific flow. Shared logic (auth checks, common
-escalation, logging) would need to live somewhere flows can call into
-rather than getting copy-pasted across 100 flows.
-
-**How would you version and deploy this safely?**
-Treat `build_agent.py` (or an equivalent declarative definition) as the
-source of truth, not the console. Changes go through a normal PR/review
-process, get applied to a staging agent first, get tested there, then
-promoted. CX supports versions/environments natively — I'd use a
-"staging" environment for anything unverified and only point production
-traffic at a version once it's been through real testing, with an easy
-rollback to the prior version if something regresses.
-
-**No-match rate suddenly spikes after a release — how do you
-investigate?**
-First thing I'd check is whether it's every intent or concentrated on a
-few — that alone tells you if it's a broad regression (webhook down,
-routing broken) or something narrower (one flow's training phrases got
-touched). Then compare timing against the release itself and against any
-NLU model retraining that might have happened independently. If it's
-concentrated, pull actual transcripts from around the spike and see what
-users are actually typing that isn't matching — usually it's either a
-wording pattern nobody trained for, or a route that got reordered or
-removed in the release.
+Answered in full in [answers.md](./answers.md) — covers flow/page
+structure rationale, the session-parameter vs. backend-storage split,
+scaling to 100+ journeys, safe versioning/deployment, and investigating a
+no-match rate spike.
 
 ## Production considerations
 
