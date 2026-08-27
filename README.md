@@ -59,7 +59,7 @@ precise version instead of this simplified view.
 cd webhook
 python -m venv venv && source venv/bin/activate
 pip install -r requirements.txt
-cp .env.example .env      # only needed if you want the shared-secret check on
+cp .env.example .env      
 python app.py
 ```
 
