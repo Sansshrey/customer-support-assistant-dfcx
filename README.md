@@ -28,48 +28,55 @@ actually finish, not a demo of every CX feature that exists.
 
 ```mermaid
 flowchart TD
-    U([User message]) --> DSF[Default Start Flow<br/>intent-based routing]
+    U([User message]) --> DSF[["Default Start Flow<br/>intent-based routing"]]
 
-    DSF -->|"my internet isn't working"| CT
-    DSF -->|"is there an outage"| OC
-    DSF -->|"check ticket INC-xxxx"| TS
+    DSF -->|"check ticket INC-xxxx"| TS_ENTRY
+    DSF -->|"my internet isn't working"| CT_ENTRY
+    DSF -->|"is there an outage"| OC_ENTRY
 
-    subgraph CT[Connectivity Troubleshooting]
+    subgraph TS["Ticket Status"]
         direction TB
-        CDS[Collect Device Scope] --> CRS[Collect Router Status]
-        CRS --> GR[Give Recommendation]
-        GR -->|resolved| RES[Resolved]
-        GR -->|not resolved| ESC[Escalate]
-        EXH[report.connectivity_issue.exhausted<br/>matched] -.skip_to_escalate=true.-> ESC
+        TS_ENTRY[Collect Ticket ID] --> TS_CALL[Call Ticket Webhook]
+        TS_CALL --> TS_SHOW[Show Ticket Status]
+        TS_CALL -.-> TS_WH[(webhook:<br/>ticket_service.py)]
     end
 
-    subgraph OC[Outage Check]
+    subgraph CT["Connectivity Troubleshooting"]
         direction TB
-        CZ[Collect Zip] --> CW[Call Outage Webhook]
-        CW -->|outage: true| OF[Outage Found]
-        CW -->|outage: false| NO[No Outage]
+        CT_ENTRY[Collect Device Scope] --> CT_ROUTER[Collect Router Status]
+        CT_ROUTER --> CT_REC[Give Recommendation]
+        CT_REC -->|resolved| CT_RES{{Resolved}}
+        CT_REC -->|not resolved| CT_ESC{{Escalate}}
+        CT_EXH["report.connectivity_issue.exhausted<br/>matched → skip_to_escalate=true"] --> CT_ESC
     end
 
-    subgraph TS[Ticket Status]
+    subgraph OC["Outage Check"]
         direction TB
-        CTI[Collect Ticket ID] --> CTW[Call Ticket Webhook]
-        CTW --> STS[Show Ticket Status]
+        OC_ENTRY[Collect Zip] --> OC_CALL[Call Outage Webhook]
+        OC_CALL -->|outage: true| OC_FOUND[Outage Found]
+        OC_CALL -->|outage: false| OC_NO[No Outage]
+        OC_CALL -.-> OC_WH[(webhook:<br/>outage_service.py)]
     end
 
-    CT <-.->|"check.outage interrupt<br/>(Global Interruptions route group)"| OC
-    NO -.resume.-> CRS
-    OF -.exits troubleshooting.-> ESC
+    CT -.->|"check.outage interrupt<br/>Global Interruptions route group"| OC
+    OC_NO -.->|resume troubleshooting| CT_ROUTER
+    OC_FOUND -.->|exits troubleshooting| CT_ESC
 
-    CW -.webhook call.-> WH[(Flask webhook<br/>outage_service.py)]
-    CTW -.webhook call.-> WH2[(Flask webhook<br/>ticket_service.py)]
+    classDef terminal fill:#ffe3e3,stroke:#c92a2a,font-weight:bold;
+    classDef webhook fill:#e7f5ff,stroke:#1971c2;
+    classDef entry fill:#d3f9d8,stroke:#2f9e44;
+    class CT_RES,CT_ESC terminal
+    class TS_WH,OC_WH webhook
+    class DSF entry
 ```
 
-Interruptions and the composite-input skip are shown as dotted lines since
-they're not the normal happy-path routes — they're the two places the
-agent deviates from the straight-line journey. Exact pages, conditions,
-and parameter names are all in the exported agent zip if you want the
-precise version instead of this simplified view.
-
+**How to read it:** solid arrows are the normal, straight-line path through
+each journey. Dotted arrows are the three places the agent deviates from
+that straight line — the outage interrupt firing mid-troubleshooting, the
+resume back into it once there's no outage, and the composite-input intent
+jumping directly to Escalate. Green is the entry router, red diamonds are
+the two terminal states in Troubleshooting, blue cylinders are the two
+places a flow calls out to the Flask webhook.
 ## Running the webhook
 
 ```bash
