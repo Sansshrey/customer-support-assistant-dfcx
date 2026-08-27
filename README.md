@@ -1,4 +1,12 @@
+# ISP Customer Support Assistant — Dialogflow CX
 
+Take-home build for a Dialogflow CX Senior Engineer assignment: a support
+assistant for an ISP that handles connectivity troubleshooting, outage
+lookups, and ticket status checks. Two of the three talk to a webhook
+backend; troubleshooting is pure flow logic. Built to be small enough to
+actually finish, not a demo of every CX feature that exists.
+
+## What's in here
 ## Architecture diagram
 
 ```mermaid
