@@ -72,7 +72,7 @@ flowchart TD
 
 **How to read it:** solid arrows are the normal, straight-line path through
 each journey. Dotted arrows are the three places the agent deviates from
-that straight line — the outage interrupt firing mid-troubleshooting, the
+that straight line the outage interrupt firing mid-troubleshooting, the
 resume back into it once there's no outage, and the composite-input intent
 jumping directly to Escalate. Green is the entry router, red diamonds are
 the two terminal states in Troubleshooting, blue cylinders are the two
