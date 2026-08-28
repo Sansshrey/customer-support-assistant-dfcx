@@ -192,7 +192,7 @@ matching whatever privacy rules apply.
 
 ## Demo
 
-Video: **[add link here]**
+Video: **https://share.vidyard.com/watch/1j9g3h3agoqi7FzHxzTZqA**
 
 Shows the composite input example going straight to Escalate, a
 simulated backend failure with graceful recovery, and short clips of a
